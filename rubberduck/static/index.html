@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RubberDuck.ai</title>
+<style>
+:root{--bg:#fafaf7;--fg:#1d1d1b;--muted:#6b6b66;--card:#fff;--line:#e4e2da;--accent:#d99a00;--accent-fg:#1d1d1b;--code:#f1efe7}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#ecebe6;--muted:#9a9990;--card:#1f1f1c;--line:#34332f;--accent:#f2b51d;--code:#262622}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:860px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:22px;margin:0 0 2px}
+.sub{color:var(--muted);margin:0 0 22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+label{display:block;font-size:12px;color:var(--muted);margin:0 0 5px}
+input,textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit}
+textarea{resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.row{display:flex;gap:10px;align-items:flex-end}
+.row>div{flex:1}
+button{background:var(--accent);color:var(--accent-fg);border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:wait}
+.tabs{display:flex;gap:6px;margin-bottom:12px}
+.tab{background:transparent;color:var(--muted);border:1px solid var(--line);padding:6px 14px}
+.tab.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+#status{color:var(--muted);font-size:13px;margin-top:8px;min-height:18px}
+#status.err{color:#c0392b}
+.prose{white-space:pre-wrap;overflow-wrap:anywhere}
+pre{background:var(--code);border-radius:8px;padding:12px;overflow-x:auto;margin:10px 0}
+pre code,.prose code{font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.prose code{background:var(--code);padding:1px 5px;border-radius:4px}
+pre code{background:none;padding:0}
+h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:18px 0 6px}
+ul{margin:0;padding-left:18px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:var(--muted)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>🦆 RubberDuck.ai</h1>
+  <p class="sub">Ask questions about a GitHub repo, get suggested changes, or generate docs. Answers cite file and line ranges.</p>
+
+  <div class="card">
+    <div class="row">
+      <div><label for="repo">GitHub repo (owner/name)</label><input id="repo" value="pallets/click" autocomplete="off"></div>
+      <button id="indexBtn" class="ghost">Index repo</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <div class="tabs">
+      <button class="tab on" data-mode="ask">Ask</button>
+      <button class="tab" data-mode="suggest">Suggest</button>
+      <button class="tab" data-mode="document">Document</button>
+    </div>
+    <label for="query" id="qLabel">Question</label>
+    <textarea id="query" rows="3" placeholder="How does Click parse command line options?"></textarea>
+    <div id="codeBox" class="hide" style="margin-top:10px">
+      <label for="code">Current code (optional)</label>
+      <textarea id="code" rows="6" placeholder="Paste the code you want changed"></textarea>
+    </div>
+    <div style="margin-top:12px"><button id="goBtn">Ask</button> <span style="color:var(--muted);font-size:12px">Ctrl+Enter</span></div>
+  </div>
+
+  <div id="out" class="card hide"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let mode = "ask";
+const COPY = {
+  ask:      {label: "Question",            ph: "How does Click parse command line options?", btn: "Ask"},
+  suggest:  {label: "Requested change",    ph: "In decorators.py, make group() add a --verbose flag", btn: "Suggest"},
+  document: {label: "Symbol to document",  ph: "Command.invoke", btn: "Document"}
+};
+
+try { $("repo").value = localStorage.getItem("rd_repo") || $("repo").value; } catch (e) {}
+
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  mode = b.dataset.mode;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t === b));
+  $("qLabel").textContent = COPY[mode].label;
+  $("query").placeholder = COPY[mode].ph;
+  $("goBtn").textContent = COPY[mode].btn;
+  $("codeBox").classList.toggle("hide", mode !== "suggest");
+});
+
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+function render(md) {
+  return md.split("```").map((part, i) => {
+    if (i % 2) {
+      const nl = part.indexOf("\n");
+      return `<pre><code>${esc(nl >= 0 ? part.slice(nl + 1) : part)}</code></pre>`;
+    }
+    return `<div class="prose">${esc(part).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`\n]+)`/g, "<code>$1</code>")}</div>`;
+  }).join("");
+}
+
+function status(msg, err) { $("status").textContent = msg; $("status").className = err ? "err" : ""; }
+
+async function call(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    let detail = await res.text();
+    try { detail = JSON.parse(detail).detail || detail; } catch (e) {}
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+$("indexBtn").onclick = async () => {
+  const repo = $("repo").value.trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return status("Use the form owner/name, e.g. pallets/click", true);
+  try { localStorage.setItem("rd_repo", repo); } catch (e) {}
+  $("indexBtn").disabled = true;
+  status("Indexing… the first run can take several minutes (clone + embeddings).");
+  try {
+    const r = await call(`/index?repo=${encodeURIComponent(repo)}`, {method: "POST"});
+    status(r.note ? `Up to date (commit ${r.sha.slice(0, 7)}).` : `Indexed ${r.files} files at commit ${r.sha.slice(0, 7)}.`);
+  } catch (e) { status(e.message, true); }
+  $("indexBtn").disabled = false;
+};
+
+async function go() {
+  const repo = $("repo").value.trim(), query = $("query").value.trim();
+  if (!repo || !query) return status("Enter a repo and a request.", true);
+  $("goBtn").disabled = true;
+  status("Thinking…");
+  try {
+    const r = await call(`/${mode}`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({repo, query, code: $("code").value, k: 8})
+    });
+    $("out").innerHTML = render(r.answer) + "<h2>Sources</h2><ul>" +
+      r.sources.map(s => `<li>${esc(s)}</li>`).join("") + "</ul>";
+    $("out").classList.remove("hide");
+    status("");
+  } catch (e) { status(e.message, true); }
+  $("goBtn").disabled = false;
+}
+
+$("goBtn").onclick = go;
+$("query").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) go(); });
+</script>
+</body>
+</html>
